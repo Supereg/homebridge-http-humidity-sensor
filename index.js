@@ -94,6 +94,9 @@ HTTP_HUMIDITY.prototype = {
 
     getHumidity: function (callback) {
         http.httpRequest(this.getUrl, (error, response, body) => {
+            if (this.pullTimer)
+                this.pullTimer.resetTimer();
+
             if (error) {
                 this.log("getHumidity() failed: %s", error.message);
                 callback(error);
