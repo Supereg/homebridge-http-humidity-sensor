@@ -2,13 +2,16 @@
 
 let Service, Characteristic, api;
 
-const configParser = require("homebridge-http-base").configParser;
-const http = require("homebridge-http-base").http;
-const notifications = require("homebridge-http-base").notifications;
-const PullTimer = require("homebridge-http-base").PullTimer;
+const _http_base = require("homebridge-http-base");
+const http = _http_base.http;
+const configParser = _http_base.configParser;
+const PullTimer = _http_base.PullTimer;
+const notifications = _http_base.notifications;
+const MQTTClient = _http_base.MQTTClient;
+const Cache = _http_base.Cache;
+const utils = _http_base.utils;
 
 const packageJSON = require("./package.json");
-
 
 module.exports = function (homebridge) {
     Service = homebridge.hap.Service;
@@ -22,6 +25,7 @@ module.exports = function (homebridge) {
 function HTTP_HUMIDITY(log, config) {
     this.log = log;
     this.name = config.name;
+    this.debug = config.debug || false;
 
     if (config.getUrl) {
         try {
@@ -36,6 +40,22 @@ function HTTP_HUMIDITY(log, config) {
         this.log.warn("Property 'getUrl' is required!");
         this.log.warn("Aborting...");
         return;
+    }
+
+    this.statusCache = new Cache(config.statusCache, 0);
+    this.statusPattern = /([0-9]{1,3})/;
+    try {
+        if (config.statusPattern)
+            this.statusPattern = configParser.parsePattern(config.statusPattern);
+    } catch (error) {
+        this.log.warn("Property 'statusPattern' was given in an unsupported type. Using default value!");
+    }
+    this.patternGroupToExtract = 1;
+    if (config.patternGroupToExtract) {
+        if (typeof config.patternGroupToExtract === "number")
+            this.patternGroupToExtract = config.patternGroupToExtract;
+        else
+            this.log.warn("Property 'patternGroupToExtract' must be a number! Using default value!");
     }
 
     this.homebridgeService = new Service.HumiditySensor(this.name);
@@ -53,6 +73,26 @@ function HTTP_HUMIDITY(log, config) {
     /** @namespace config.notificationPassword */
     /** @namespace config.notificationID */
     notifications.enqueueNotificationRegistrationIfDefined(api, log, config.notificationID, config.notificationPassword, this.handleNotification.bind(this));
+
+    /** @namespace config.mqtt */
+    if (config.mqtt) {
+        let options;
+        try {
+            options = configParser.parseMQTTOptions(config.mqtt);
+        } catch (error) {
+            this.log.error("Error occurred while parsing MQTT property: " + error.message);
+            this.log.error("MQTT will not be enabled!");
+        }
+
+        if (options) {
+            try {
+                this.mqttClient = new MQTTClient(this.homebridgeService, options, this.log);
+                this.mqttClient.connect();
+            } catch (error) {
+                this.log.error("Error occurred creating MQTT client: " + error.message);
+            }
+        }
+    }
 }
 
 HTTP_HUMIDITY.prototype = {
@@ -63,6 +103,9 @@ HTTP_HUMIDITY.prototype = {
     },
 
     getServices: function () {
+        if (!this.homebridgeService)
+            return [];
+
         const informationService = new Service.AccessoryInformation();
 
         informationService
@@ -75,24 +118,26 @@ HTTP_HUMIDITY.prototype = {
     },
 
     handleNotification: function(body) {
-        const value = body.value;
-
-        /** @namespace body.characteristic */
-        let characteristic;
-        switch (body.characteristic) {
-            case "CurrentRelativeHumidity":
-                characteristic = Characteristic.CurrentRelativeHumidity;
-                break;
-            default:
-                this.log("Encountered unknown characteristic handling notification: " + body.characteristic);
-                return;
+        if (!this.homebridgeService.testCharacteristic(body.characteristic)) {
+            this.log("Encountered unknown characteristic when handling notification (or characteristic which wasn't added to the service): " + body.characteristic);
+            return;
         }
 
-        this.log("Updating '" + body.characteristic + "' to new value: " + body.value);
-        this.homebridgeService.setCharacteristic(characteristic, value);
+        if (this.debug)
+            this.log("Updating '" + body.characteristic + "' to new value: " + body.value);
+        this.homebridgeService.setCharacteristic(body.characteristic, body.value);
     },
 
     getHumidity: function (callback) {
+        if (!this.statusCache.shouldQuery()) {
+            const value = this.homebridgeService.getCharacteristic(Characteristic.CurrentRelativeHumidity).value;
+            if (this.debug)
+                this.log(`getHumidity() returning cached value ${value}${this.statusCache.isInfinite()? " (infinite cache)": ""}`);
+
+            callback(null, value);
+            return;
+        }
+
         http.httpRequest(this.getUrl, (error, response, body) => {
             if (this.pullTimer)
                 this.pullTimer.resetTimer();
@@ -101,14 +146,24 @@ HTTP_HUMIDITY.prototype = {
                 this.log("getHumidity() failed: %s", error.message);
                 callback(error);
             }
-            else if (response.statusCode !== 200) {
+            else if (!http.isHttpSuccessCode(response.statusCode)) {
                 this.log("getHumidity() returned http error: %s", response.statusCode);
                 callback(new Error("Got http error code " + response.statusCode));
             }
             else {
-                const humidity = parseFloat(body);
-                this.log("Humidity is currently at %s", humidity);
+                let humidity;
+                try {
+                    humidity = utils.extractValueFromPattern(this.statusPattern, body, this.patternGroupToExtract);
+                } catch (error) {
+                    this.log("getHumidity() error occurred while extracting humidity from body: " + error.message);
+                    callback(new Error("pattern error"));
+                    return;
+                }
 
+                if (this.debug)
+                    this.log("Humidity is currently at %s", humidity);
+
+                this.statusCache.queried();
                 callback(null, humidity);
             }
         });
