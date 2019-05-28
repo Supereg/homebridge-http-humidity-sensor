@@ -1,6 +1,6 @@
 {
   "name": "homebridge-http-humidity-sensor",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Http humidity sensor for Homebridge",
   "license": "ISC",
   "keywords": [
