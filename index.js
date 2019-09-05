@@ -118,14 +118,15 @@ HTTP_HUMIDITY.prototype = {
     },
 
     handleNotification: function(body) {
-        if (!this.homebridgeService.testCharacteristic(body.characteristic)) {
+        const characteristic = utils.getCharacteristic(this.homebridgeService, body.characteristic);
+        if (!characteristic) {
             this.log("Encountered unknown characteristic when handling notification (or characteristic which wasn't added to the service): " + body.characteristic);
             return;
         }
 
         if (this.debug)
             this.log("Updating '" + body.characteristic + "' to new value: " + body.value);
-        this.homebridgeService.setCharacteristic(body.characteristic, body.value);
+        characteristic.updateValue(body.value);
     },
 
     getHumidity: function (callback) {
